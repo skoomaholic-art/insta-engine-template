@@ -128,7 +128,6 @@ Pick a time when creating a post or on the final card (**🕒 Time**). Times are
 | Final arrives but nothing is published | `IGM_ENABLE_PUBLISH` is not `true` | Set it to `true` |
 | `ffmpeg: command not found` | Runner image changed | Workflows install it automatically — re-run; if it persists, check the step that installs ffmpeg |
 | Schedules never run | New copies need a first manual run; GitHub also pauses schedules after 60 days without commits | Run each workflow once with *Run workflow* |
-| Image fetch error for a still | The image host isn't allowed or returned HTML | Only `image.tmdb.org` and `assets.fanart.tv` are allowed; pick another still |
 | Run takes long on the first Reels | Model and dependencies are downloaded | Normal once; later runs use the cache |
 
 Open the red run in **Actions** to see the exact step that failed. Never paste tokens into issues or logs.
@@ -136,10 +135,9 @@ Open the red run in **Actions** to see the exact step that failed. Never paste t
 ---
 
 ## Costs
-GitHub Actions minutes for a private repo on the free plan (2,000 min/month) are plenty: a carousel takes ~2–3 min, a Reels ~4–6 min. The Instagram API, TMDB and the music library are free.
+GitHub Actions minutes for a private repo on the free plan (2,000 min/month) are plenty: a carousel takes ~2–3 min, a Reels ~4–6 min. The Instagram API and the music library are free.
 
 ## Credits & license
 - Music: Kevin MacLeod ([incompetech.com](https://incompetech.com)), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) — credited in captions automatically
 - Depth model: [MiDaS](https://github.com/isl-org/MiDaS) (MIT)
-- Movie stills: © their rights holders, via the TMDB / fanart.tv APIs; used only after the owner's confirmation. This product uses the TMDB API but is not endorsed or certified by TMDB
 - Code: MIT — see [LICENSE](LICENSE)
