@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "note": "ИИ-редактор (Vercel Cron, ~09:00 Алматы): сам выбирает темы из новостей и идей, пишет тексты (по полной статье) и присылает на согласование. per_day — постов в день, max_waiting — не больше столько несогласованных. enabled=false — выключить.",
+  "enabled": true,
+  "per_day": 3,
+  "max_waiting": 6,
+  "formats": [
+    "post",
+    "carousel",
+    "reel"
+  ]
+}

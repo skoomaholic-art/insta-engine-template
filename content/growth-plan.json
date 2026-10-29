@@ -1,0 +1,287 @@
+{
+  "autonomy_gates": {
+    "approved_comment_examples": 30,
+    "reviewed_posts": 20
+  },
+  "brand": "MyBrand",
+  "experiment": {
+    "kpis": [
+      "Пересылки / охват",
+      "Сохранения / охват",
+      "Подписки / охват",
+      "Среднее удержание Reels"
+    ],
+    "rule": "Не объявлять победителя по одному ролику: сравнивать сопоставимые публикации по теме, формату и возрасту поста.",
+    "slots_almaty": [
+      "18:30",
+      "21:00"
+    ],
+    "start_date": null,
+    "start_note": "Стартует после оформления профиля и включения публикации (этапы 2–3).",
+    "title": "Базовый тест 4 недели",
+    "total": {
+      "carousels": 8,
+      "cinema": 10,
+      "posts": 20,
+      "reels": 12,
+      "series": 10
+    },
+    "weeks": [
+      {
+        "carousels": 2,
+        "cinema": 3,
+        "goal": "Первый базовый набор, понятный профиль",
+        "n": 1,
+        "reels": 3,
+        "series": 2
+      },
+      {
+        "carousels": 2,
+        "cinema": 2,
+        "goal": "Проверка обратных гипотез",
+        "n": 2,
+        "reels": 3,
+        "series": 3
+      },
+      {
+        "carousels": 2,
+        "cinema": 3,
+        "goal": "Проверка улучшенных хуков",
+        "n": 3,
+        "reels": 3,
+        "series": 2
+      },
+      {
+        "carousels": 2,
+        "cinema": 2,
+        "goal": "Повтор лучших механик, отчёт по 20 публикациям",
+        "n": 4,
+        "reels": 3,
+        "series": 3
+      }
+    ]
+  },
+  "goal": "Авторский медиапроект о кино и сериалах с настоящей аудиторией; реклама — только после устойчивых результатов.",
+  "note": "Источник для вкладки «План». who: owner — делаешь ты (отметка тапом), auto — закрывается само по данным, claude — делает Claude по запросу. Новые задачи получают added_at (метка NEW на 7 дней). Задачи с auto закрываются автоматически.",
+  "schema_version": 1,
+  "stages": [
+    {
+      "id": "S1",
+      "status": "todo",
+      "summary": "Бот и мини-апка привязаны к владельцу, мост в IGM проверен.",
+      "tasks": [
+        {
+          "title": "Привязать Telegram ID владельца",
+          "who": "claude",
+          "done": false
+        },
+        {
+          "title": "Защищённый мост Personal Assistant ↔ IGM",
+          "who": "claude",
+          "done": false
+        },
+        {
+          "title": "Проверить карточки согласования",
+          "who": "owner",
+          "done": false
+        }
+      ],
+      "title": "Telegram-пульт"
+    },
+    {
+      "id": "S2",
+      "status": "todo",
+      "summary": "Имя, BIO, аватар, визуальная система и закрепы готовы",
+      "tasks": [
+        {
+          "title": "Согласовать имя «MyBrand | Кино и сериалы»",
+          "who": "owner",
+          "done": false
+        },
+        {
+          "title": "Выбрать и установить BIO",
+          "who": "owner",
+          "done": false
+        },
+        {
+          "title": "Аватар",
+          "who": "owner",
+          "done": false
+        },
+        {
+          "title": "Визуальная система обложек (конструктор)",
+          "who": "claude",
+          "done": false
+        },
+        {
+          "title": "Три закреплённые публикации",
+          "who": "owner",
+          "done": false
+        }
+      ],
+      "title": "Оформление Instagram"
+    },
+    {
+      "id": "S3",
+      "status": "todo",
+      "summary": "Робот публикует сам после двух твоих согласований (текст и финал). Посты и карусели уже выходят, Reels пока не было",
+      "tasks": [
+        {
+          "title": "Права Meta на публикацию и первая публикация роботом",
+          "who": "auto",
+          "done": false,
+          "auto": "api_publish"
+        },
+        {
+          "title": "Первый Reels через робота",
+          "who": "auto",
+          "done": false,
+          "auto": "reels_published"
+        },
+        {
+          "title": "Защита от дублей: блокировка повторной публикации и пометка похожих постов",
+          "who": "claude",
+          "done": false
+        }
+      ],
+      "title": "Публикация через API"
+    },
+    {
+      "id": "S4",
+      "status": "todo",
+      "summary": "Первые 20 публикаций: проверяем форматы и темы, лаборатория ищет, что заходит",
+      "tasks": [
+        {
+          "title": "Согласовывать посты в боте или во вкладке «Посты» (2–3 в день)",
+          "who": "owner",
+          "done": false
+        },
+        {
+          "title": "Опубликовать 20 материалов",
+          "who": "auto",
+          "done": false,
+          "auto": "published_20"
+        },
+        {
+          "title": "Хотя бы 3 Reels среди них",
+          "who": "auto",
+          "done": false,
+          "auto": "reels_3"
+        },
+        {
+          "title": "Отчёт лаборатории по 20 публикациям",
+          "who": "auto",
+          "done": false,
+          "auto": "lab_report_20"
+        }
+      ],
+      "title": "Первые 20 материалов"
+    },
+    {
+      "id": "S5",
+      "status": "todo",
+      "summary": "Загрузка комментариев, черновики ответов, согласование в пульте.",
+      "tasks": [
+        {
+          "title": "Включить разрешение instagram_business_manage_comments в приложении Meta",
+          "who": "owner",
+          "done": false
+        },
+        {
+          "title": "Загрузка комментариев в пульт и черновики ответов от ИИ",
+          "who": "claude",
+          "done": false
+        },
+        {
+          "title": "Отправка ответов после твоего согласования",
+          "who": "claude",
+          "done": false
+        }
+      ],
+      "title": "Модерация комментариев"
+    },
+    {
+      "id": "S6",
+      "status": "todo",
+      "summary": "Лаборатория каждые 6 часов собирает охват, лайки, сохранения и пересылки и сравнивает форматы, жанры, подачу",
+      "tasks": [
+        {
+          "title": "Ежедневные снимки статистики",
+          "who": "auto",
+          "done": false,
+          "auto": "snapshots"
+        },
+        {
+          "title": "Разрешение Instagram Insights",
+          "who": "auto",
+          "done": false,
+          "auto": "insights"
+        },
+        {
+          "title": "Замеры 24 ч / 72 ч / 7 дней",
+          "who": "auto",
+          "done": false,
+          "auto": "lab_checkpoints"
+        },
+        {
+          "title": "Сравнение форматов и рубрик",
+          "who": "auto",
+          "done": false,
+          "auto": "lab_compare"
+        }
+      ],
+      "title": "Viral Lab"
+    },
+    {
+      "id": "S7",
+      "status": "locked",
+      "summary": "Только после 20 проверенных публикаций и 30 ответов, и только по отдельному решению владельца.",
+      "tasks": [
+        {
+          "title": "20 проверенных публикаций",
+          "who": "auto",
+          "done": false,
+          "auto": "published_20"
+        },
+        {
+          "title": "30 одобренных ответов на комментарии",
+          "who": "auto",
+          "done": false,
+          "auto": "replies_30"
+        },
+        {
+          "title": "Решение владельца включить автономность",
+          "who": "owner",
+          "done": false
+        }
+      ],
+      "title": "Постепенная автономность"
+    },
+    {
+      "id": "S8",
+      "status": "todo",
+      "summary": "Медиакит и интеграции после устойчивого органического роста.",
+      "tasks": [
+        {
+          "title": "1000 подписчиков",
+          "who": "auto",
+          "done": false,
+          "auto": "followers_1000"
+        },
+        {
+          "title": "Медиакит: аудитория, охваты, форматы",
+          "who": "claude",
+          "done": false
+        },
+        {
+          "title": "Первая интеграция по решению владельца",
+          "who": "owner",
+          "done": false
+        }
+      ],
+      "title": "Монетизация"
+    }
+  ],
+  "timezone": "Asia/Almaty",
+  "updated": "2026-10-28"
+}

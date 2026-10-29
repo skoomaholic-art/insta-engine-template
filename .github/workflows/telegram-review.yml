@@ -1,0 +1,17 @@
+name: IGM - Legacy Telegram Bot (disabled)
+
+# The Telegram interface moved to the separate -Personal-Assistant repository.
+# Keeping a manual no-op to ensure this workflow never polls the same Telegram bot
+# and never competes for getUpdates with the new owner-control service.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  disabled:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - run: echo 'Telegram handler migrated to YOUR_GITHUB_LOGIN/assistant-bot. No Telegram polling here.'

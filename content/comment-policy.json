@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "mode": "review_each",
+  "owner_enabled_autonomy": false,
+  "owner_activation_reference": null,
+  "minimum_approved_examples_before_review": 30,
+  "scope": "Replies to comments under own Instagram media only. Comments on other accounts are draft-only.",
+  "required_permission": "instagram_business_manage_comments",
+  "prohibited_usernames": [
+    "aika_st"
+  ],
+  "allow_proactive_public_comment_api": false,
+  "delete_blocked_user_comments": "separate moderation workflow, not part of learning queue",
+  "situations": [
+    "question",
+    "praise",
+    "constructive_criticism",
+    "disagreement",
+    "troll_or_spam",
+    "spoiler",
+    "sensitive",
+    "other"
+  ],
+  "required_context": [
+    "original_comment",
+    "author",
+    "media_id",
+    "content_topic",
+    "situation",
+    "suggested_reply",
+    "decision",
+    "reason"
+  ],
+  "rules": [
+    "Do not engage with blocked usernames under any circumstance",
+    "No spam, unsolicited commercial pitches, insults or personalized harassment",
+    "Do not make up movie facts, dates or streaming availability",
+    "No unmarked spoilers and no unverified claims",
+    "No promotional links or DM invitations without owner instruction",
+    "Always allow no reply as a valid editorial decision",
+    "One reply at most per approved review; no retries after uncertain API outcome"
+  ]
+}

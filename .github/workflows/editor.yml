@@ -1,0 +1,29 @@
+name: MyBrand - AI Editor (3 topics a day)
+
+# ИИ-редактор на Vercel пишет по одному посту за вызов (укладывается в лимит 60 с).
+# Норма в день и максимум ждущих согласования — в content/auto-editor.json.
+on:
+  schedule:
+    - cron: '7 3 * * *'   # ~08:07 Алматы
+    - cron: '7 8 * * *'   # ~13:07
+    - cron: '7 13 * * *'  # ~18:07
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  editor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Ask the AI editor for one post
+        env:
+          PYTHONPATH: src
+          PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
+          PIPELINE_BASE_URL: ${{ vars.PIPELINE_BASE_URL }}
+        run: python -m igm.editor_call

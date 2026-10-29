@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "mode": "review_each",
+  "notes": "Mandatory human review for every post until owner expressly opts in to autonomous mode. Global IGM_ENABLE_PUBLISH remains false.",
+  "autonomy_activation": "explicit_owner_decision_only",
+  "min_reviewed_posts_before_considering_autonomy": 20,
+  "allowed_topics": [
+    "cinema",
+    "series",
+    "ai_video"
+  ],
+  "allowed_formats": [
+    "IMAGE"
+  ],
+  "restricted_without_specific_review": [
+    "third_party_film_footage",
+    "third_party_movie_posters",
+    "unlicensed_soundtracks",
+    "unverified_real_world_claims",
+    "spoilers_without_warning",
+    "sponsored_content",
+    "personal_data",
+    "political_persuasion"
+  ],
+  "do_not_contact": [
+    "aika_st"
+  ],
+  "filters": {
+    "require_rights_clearance": true,
+    "require_fact_check": true,
+    "require_exact_account_match": true,
+    "require_preapproval_while_in_review_each": true
+  }
+}

@@ -1,0 +1,71 @@
+name: MyBrand - Post Pipeline (render & publish)
+
+# Запускается, когда бот/пульт меняет очередь постов (коммит через IGM_BRIDGE_TOKEN).
+# Коммиты самого workflow (GITHUB_TOKEN) повторно его не запускают.
+on:
+  push:
+    branches: [main]
+    paths: ['data/pipeline/posts.json']
+  # Отложенные публикации: раз в час с 08:00 до 23:00 по Алматы (GitHub может задержать запуск на 5–20 минут)
+  schedule:
+    - cron: '2 3-18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: igm-pipeline
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Anything to do?
+        id: check
+        env:
+          PYTHONPATH: src
+        run: python -m igm.pipeline pending
+      - name: Tests
+        if: steps.check.outputs.work == 'yes'
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests
+      - name: Cache depth model (2.5D Reels)
+        if: steps.check.outputs.work == 'yes'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/igm
+          key: igm-midas-small-v21
+      - name: Install headless browser
+        if: steps.check.outputs.work == 'yes'
+        run: |
+          pip install -q onnxruntime opencv-python-headless numpy
+          pip install -q playwright==1.48.0
+          python -m playwright install --with-deps chromium
+          command -v ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+          ffmpeg -version | head -1
+      - name: Render / publish
+        if: steps.check.outputs.work == 'yes'
+        env:
+          PYTHONPATH: src
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          META_GRAPH_VERSION: v26.0
+          IG_AUTH_MODE: instagram
+          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+          IGM_ENABLE_PUBLISH: ${{ vars.IGM_ENABLE_PUBLISH }}
+          PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
+          PIPELINE_BASE_URL: ${{ vars.PIPELINE_BASE_URL }}
+        run: |
+          git config user.name "mybrand-pipeline"
+          git config user.email "pipeline@users.noreply.github.com"
+          python -m igm.pipeline run

@@ -1,0 +1,44 @@
+name: MyBrand - Viral Lab (metrics 24h/72h/7d)
+
+on:
+  schedule:
+    # каждые 6 часов; GitHub может задерживать запуски
+    - cron: '41 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: igm-pipeline
+  cancel-in-progress: false
+
+jobs:
+  lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Collect metrics and analyze
+        env:
+          PYTHONPATH: src
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          META_GRAPH_VERSION: v26.0
+          IG_AUTH_MODE: instagram
+          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+        run: python -m igm.lab
+      - name: Save
+        run: |
+          git config user.name "mybrand-lab"
+          git config user.email "lab@users.noreply.github.com"
+          git add data/pipeline/posts.json data/pipeline/lab.json
+          git diff --cached --quiet && exit 0
+          git commit -q -m "lab: metrics and segment analysis"
+          for i in 1 2 3; do git push -q origin HEAD:main && exit 0; git pull -q --rebase origin main; done
+          exit 1
