@@ -1,7 +1,7 @@
-"""Scheduled, fail-closed publisher for owner-authored and verified Instagram content.
+"""Legacy autopilot queue helpers (selection rules only).
 
-Only one due IMAGE per run. A GitHub state lock is committed before any Meta write.
-If interrupted after the lock, never blindly republish; the item needs review.
+Публикация отсюда удалена: run_autopilot ничего не публикует. Единственный путь в Instagram —
+pipeline.py, где нужны оба согласования владельца (approvals.text и approvals.final).
 """
 import base64
 import json
@@ -12,7 +12,6 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from pathlib import Path
-from .instagram import InstagramAPI, InstagramError
 
 QUEUE_PATH = "content/autopilot-queue.json"
 POLICY_PATH = Path(__file__).resolve().parents[2] / "content" / "publishing-policy.json"
@@ -143,29 +142,8 @@ class GitHubQueue:
 
 
 def run_autopilot(queue_store=None, instagram=None, now=None):
-    """No writes to Meta without global switch and a committed per-item lock."""
-    if os.getenv("IGM_ENABLE_PUBLISH", "").strip().lower() != "true":
-        return "IGM AUTOPILOT: выключен глобальным переключателем. Публикаций нет."
-    now = now or datetime.now(timezone.utc)
-    queue_store = queue_store or GitHubQueue()
-    manifest, sha = queue_store.load()
-    policy = load_policy()
-    chosen = choose_due(manifest, now, policy)
-    if chosen is None:
-        return "IGM AUTOPILOT: готовых публикаций на этот временной слот нет."
-    instagram = instagram or InstagramAPI()
-    instagram.assert_correct_account()
-    # Commit publishing state BEFORE sending content. A failed/uncertain publish will not be auto-retried.
-    chosen["status"] = "publishing"
-    chosen["started_at_utc"] = now.isoformat(timespec="seconds")
-    sha = queue_store.save(manifest, sha)
-    try:
-        result = instagram.publish_image(chosen["image_url"], chosen["caption"])
-    except InstagramError:
-        # Leave locked as publishing; cannot determine safely whether Meta already accepted the post.
-        return "IGM AUTOPILOT: ошибка Meta при публикации, карточка заблокирована от повторов. Требуется проверка."
-    chosen["status"] = "published"
-    chosen["published_at_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    chosen["instagram_media_id"] = result["media_id"]
-    queue_store.save(manifest, sha)
-    return f'IGM AUTOPILOT: опубликовано {chosen["id"]}, media ID {result["media_id"]}.'
+    """Публикация автопилотом отключена (защита в глубину): он публиковал с одним согласованием
+    или в «автономном» режиме. Посты выходят только через пайплайн (pipeline.py) с двумя
+    согласованиями владельца — текст и финал. Здесь нет ни чтения очереди, ни вызовов Meta."""
+    return ("IGM AUTOPILOT: выключен. Публикация только через пайплайн постов "
+            "с двумя согласованиями владельца (текст и финал).")

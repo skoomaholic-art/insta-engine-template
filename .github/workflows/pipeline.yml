@@ -1,14 +1,16 @@
 name: MyBrand - Post Pipeline (render & publish)
 
-# Запускается, когда бот/пульт меняет очередь постов (коммит через IGM_BRIDGE_TOKEN).
+# Запускается «пинком» бота: бот пишет data/pipeline/kick.json, когда у робота есть работа
+# (рендер, публикация, наступившая отложенная публикация, зависший пост). Обычные правки posts.json
+# workflow больше не запускают. Робот сам kick.json никогда не пишет.
 # Коммиты самого workflow (GITHUB_TOKEN) повторно его не запускают.
 on:
   push:
     branches: [main]
-    paths: ['data/pipeline/posts.json']
-  # Отложенные публикации: раз в час с 08:00 до 23:00 по Алматы (GitHub может задержать запуск на 5–20 минут)
+    paths: ['data/pipeline/kick.json']
+  # Резерв: раз в час с 08:17 до 23:17 по Алматы (на случай потерянного пинка; GitHub может задержать запуск)
   schedule:
-    - cron: '2 3-18 * * *'
+    - cron: '17 3-18 * * *'
   workflow_dispatch:
 
 permissions:
@@ -41,15 +43,17 @@ jobs:
           PYTHONPATH: src
         run: python -m unittest discover -s tests
       - name: Cache depth model (2.5D Reels)
-        if: steps.check.outputs.work == 'yes'
+        if: steps.check.outputs.render == 'yes'
         uses: actions/cache@v4
         with:
           path: ~/.cache/igm
-          key: igm-midas-small-v21
+          # суффикс версии: смена ключа выбрасывает испорченный кэш модели
+          key: igm-midas-small-v21-r2
+      # Тяжёлые зависимости нужны только для рендера; для публикации и сверки — только API Instagram
       - name: Install headless browser
-        if: steps.check.outputs.work == 'yes'
+        if: steps.check.outputs.render == 'yes'
         run: |
-          pip install -q onnxruntime opencv-python-headless numpy
+          pip install -q onnxruntime==1.20.1 opencv-python-headless==4.10.0.84 numpy==2.1.3
           pip install -q playwright==1.48.0
           python -m playwright install --with-deps chromium
           command -v ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
@@ -62,11 +66,12 @@ jobs:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           META_GRAPH_VERSION: v26.0
           IG_AUTH_MODE: instagram
-          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+          IG_EXPECTED_USERNAME: mybrand
           IGM_ENABLE_PUBLISH: ${{ vars.IGM_ENABLE_PUBLISH }}
           PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
           PIPELINE_BASE_URL: ${{ vars.PIPELINE_BASE_URL }}
         run: |
+          echo "work: ${{ steps.check.outputs.kinds }}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           python -m igm.pipeline run

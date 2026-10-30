@@ -12,7 +12,30 @@ from urllib.request import Request, urlopen
 
 
 class InstagramError(RuntimeError):
-    pass
+    """Ошибка Meta API. code/subcode/http_status — разобранные поля ответа (None, если их нет)."""
+
+    def __init__(self, message, code=None, subcode=None, http_status=None):
+        super().__init__(message)
+        self.code = code
+        self.subcode = subcode
+        self.http_status = http_status
+
+    @property
+    def token_expired(self):
+        # 190 — недействительный/просроченный токен доступа
+        return self.code == 190
+
+    @property
+    def transient(self):
+        # 5xx, сетевые сбои и «временные» коды Meta (1, 2) — можно переспросить
+        return (self.http_status or 0) >= 500 or self.http_status == -1 or self.code in (1, 2)
+
+
+def _int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class InstagramAPI:
@@ -51,18 +74,24 @@ class InstagramAPI:
         except HTTPError as ex:
             # Never echo tokens or URLs (they may contain credentials).
             try:
-                detail = json.loads(ex.read().decode('utf-8')).get('error', {})
-                code = detail.get('code', 'unknown')
-                subcode = detail.get('error_subcode', '')
-            except (ValueError, UnicodeError):
-                code, subcode = 'unknown', ''
-            raise InstagramError(f'Meta API returned HTTP {ex.code}; error code {code}, subcode {subcode}') from None
-        except (URLError, TimeoutError) as ex:
-            raise InstagramError(f'Network request failed ({type(ex).__name__})') from None
+                detail = json.loads(ex.read().decode('utf-8')).get('error', {}) or {}
+            except (ValueError, UnicodeError, AttributeError, OSError):
+                detail = {}
+            code, subcode = _int_or_none(detail.get('code')), _int_or_none(detail.get('error_subcode'))
+            raise InstagramError(
+                f'Meta API returned HTTP {ex.code}; error code {code if code is not None else "unknown"}, '
+                f'subcode {subcode if subcode is not None else ""}',
+                code=code, subcode=subcode, http_status=ex.code) from None
+        except (URLError, TimeoutError, OSError) as ex:
+            # http_status=-1: ответа не было (сеть/таймаут) — исход запроса неизвестен
+            raise InstagramError(f'Network request failed ({type(ex).__name__})', http_status=-1) from None
         except ValueError:
             raise InstagramError('Meta API returned malformed JSON') from None
         if 'error' in payload:
-            raise InstagramError(f'Meta API error code {payload["error"].get("code", "unknown")}')
+            detail = payload['error'] if isinstance(payload['error'], dict) else {}
+            code, subcode = _int_or_none(detail.get('code')), _int_or_none(detail.get('error_subcode'))
+            raise InstagramError(f'Meta API error code {code if code is not None else "unknown"}, subcode {subcode if subcode is not None else ""}',
+                                 code=code, subcode=subcode)
         return payload
 
     def profile(self):
@@ -150,19 +179,43 @@ class InstagramAPI:
             raise InstagramError('Meta did not return an Instagram media container ID')
         return cid
 
-    def wait_container(self, container_id, attempts=40, delay=5, sleep=time.sleep):
-        """Video containers can take a minute or more to process."""
+    def container_status(self, container_id):
+        """status_code контейнера: IN_PROGRESS / FINISHED / PUBLISHED / ERROR / EXPIRED."""
+        if not str(container_id).isdigit():
+            raise InstagramError('Invalid container ID')
+        return str(self.request(str(container_id), params={'fields': 'status_code'}).get('status_code', ''))
+
+    def wait_container(self, container_id, attempts=40, delay=5, sleep=time.sleep, max_transient=3):
+        """Video containers can take a minute or more to process.
+        Возвращает 'FINISHED' или 'PUBLISHED' (контейнер уже опубликован — повторно публиковать нельзя).
+        Единичные 5xx/сетевые сбои при опросе терпим (до max_transient подряд)."""
+        transient = 0
         for attempt in range(attempts):
-            state = self.request(container_id, params={'fields': 'status_code'}).get('status_code', '')
-            if state == 'FINISHED':
-                return True
+            try:
+                state = self.container_status(container_id)
+                transient = 0
+            except InstagramError as err:
+                if not err.transient or transient >= max_transient:
+                    raise
+                transient += 1
+                state = ''
+            if state in ('FINISHED', 'PUBLISHED'):
+                return state
             if state in ('ERROR', 'EXPIRED'):
                 raise InstagramError(f'Instagram media container status: {state}')
             if attempt < attempts - 1:
                 sleep(delay)
         raise InstagramError('Media container is still processing; nothing was published')
 
-    def publish_container(self, container_id):
+    def _ready(self, container_id, attempts, delay, sleep):
+        if self.wait_container(container_id, attempts=attempts, delay=delay, sleep=sleep) == 'PUBLISHED':
+            raise InstagramError('Instagram media container is already PUBLISHED; refusing to publish it again')
+
+    def publish_container(self, container_id, on_container=None):
+        # Сначала сохраняем id контейнера (on_container коммитит ig_pending), и только потом media_publish:
+        # если ответ Meta потеряется, по контейнеру можно проверить, вышел ли пост.
+        if on_container:
+            on_container(container_id)
         publication = self.request(self.account_id + '/media_publish', post={'creation_id': container_id})
         media_id = str(publication.get('id', ''))
         if not media_id.isdigit():
@@ -174,7 +227,7 @@ class InstagramAPI:
             pass
         return {'media_id': media_id, 'container_id': container_id, 'permalink': link}
 
-    def publish_carousel(self, image_urls, caption, sleep=time.sleep):
+    def publish_carousel(self, image_urls, caption, sleep=time.sleep, on_container=None):
         if not 2 <= len(image_urls) <= 10:
             raise InstagramError('Carousel needs 2 to 10 images')
         if len(caption) > 2200:
@@ -185,22 +238,22 @@ class InstagramAPI:
         children = []
         for url in image_urls:
             cid = self._container({'image_url': url, 'is_carousel_item': 'true'})
-            self.wait_container(cid, attempts=12, delay=3, sleep=sleep)
+            self._ready(cid, 12, 3, sleep)
             children.append(cid)
         parent = self._container({'media_type': 'CAROUSEL', 'children': ','.join(children), 'caption': caption})
-        self.wait_container(parent, attempts=12, delay=3, sleep=sleep)
-        return self.publish_container(parent)
+        self._ready(parent, 12, 3, sleep)
+        return self.publish_container(parent, on_container)
 
-    def publish_single_image(self, image_url, caption, sleep=time.sleep):
+    def publish_single_image(self, image_url, caption, sleep=time.sleep, on_container=None):
         self._check_public_url(image_url)
         if len(caption) > 2200:
             raise InstagramError('Instagram caption is too long (2200-character limit)')
         self.assert_correct_account()
         cid = self._container({'image_url': image_url, 'caption': caption})
-        self.wait_container(cid, attempts=12, delay=3, sleep=sleep)
-        return self.publish_container(cid)
+        self._ready(cid, 12, 3, sleep)
+        return self.publish_container(cid, on_container)
 
-    def publish_reel(self, video_url, caption, cover_url=None, sleep=time.sleep):
+    def publish_reel(self, video_url, caption, cover_url=None, sleep=time.sleep, on_container=None):
         self._check_public_url(video_url)
         if len(caption) > 2200:
             raise InstagramError('Instagram caption is too long (2200-character limit)')
@@ -210,8 +263,8 @@ class InstagramAPI:
             self._check_public_url(cover_url)
             post['cover_url'] = cover_url
         cid = self._container(post)
-        self.wait_container(cid, attempts=40, delay=6, sleep=sleep)
-        return self.publish_container(cid)
+        self._ready(cid, 40, 6, sleep)
+        return self.publish_container(cid, on_container)
 
     def publishing_limit(self):
         """Needs instagram_business_content_publish; a permission probe without posting."""
@@ -242,8 +295,7 @@ class InstagramAPI:
                         out[row.get('name')] = value
                 return out
             except InstagramError as err:
-                text = str(err)
-                if 'error code 10,' in text or 'error code 190' in text or 'error code 200' in text:
+                if err.code in (10, 190, 200):
                     raise  # permission / token problems: let caller fall back
                 if len(metrics) <= 2:
                     raise

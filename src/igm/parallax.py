@@ -1,6 +1,8 @@
 """2.5D: из одной картинки — «живой» кадр. Нейросеть MiDaS (бесплатная, работает на CPU) оценивает глубину,
 дальше камера плавно наезжает и смещается: близкие объекты движутся сильнее дальних, появляется объём.
 """
+import shutil
+import socket
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -9,6 +11,8 @@ import numpy as np
 
 MODEL_URL = "https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx"
 MODEL_PATH = Path.home() / ".cache" / "igm" / "midas-small.onnx"
+MODEL_MIN_BYTES = 10 * 1024 * 1024  # настоящая модель ~66 МБ; меньше — оборванная загрузка
+DOWNLOAD_TIMEOUT = 60
 W, H, FPS = 1080, 1920, 30
 
 # движения камеры: (наезд, сдвиг x, сдвиг y) за всю сцену; глубина усиливает их для близких объектов
@@ -20,12 +24,39 @@ MOVES = [
 ]
 
 
+_DOWNLOAD_FAILED = None  # причина неудачи: за один запуск модель не перекачиваем на каждой сцене
+
+
+def ensure_model(path=MODEL_PATH, url=MODEL_URL, opener=urllib.request.urlopen, timeout=DOWNLOAD_TIMEOUT):
+    """Скачать модель во временный .part с таймаутом, проверить размер и только потом переименовать.
+    Оборванный файл в кэш не попадает; испорченный кэш (слишком маленький) удаляем."""
+    global _DOWNLOAD_FAILED
+    path = Path(path)
+    if path.exists() and path.stat().st_size >= MODEL_MIN_BYTES:
+        return path
+    if _DOWNLOAD_FAILED:
+        raise RuntimeError(f"модель глубины недоступна: {_DOWNLOAD_FAILED}")
+    if path.exists():
+        path.unlink()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(path.name + ".part")
+    try:
+        with opener(url, timeout=timeout) as r, open(part, "wb") as f:
+            shutil.copyfileobj(r, f, 1 << 20)
+        size = part.stat().st_size
+        if size < MODEL_MIN_BYTES:
+            raise RuntimeError(f"скачано только {size} байт")
+        part.replace(path)
+        return path
+    except (OSError, socket.timeout, RuntimeError) as err:
+        _DOWNLOAD_FAILED = f"{type(err).__name__}: {err}"[:200]
+        part.unlink(missing_ok=True)
+        raise RuntimeError(f"модель глубины не скачалась: {_DOWNLOAD_FAILED}") from None
+
+
 def _session():
     import onnxruntime as ort
-    if not MODEL_PATH.exists():
-        MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-    return ort.InferenceSession(str(MODEL_PATH), providers=["CPUExecutionProvider"])
+    return ort.InferenceSession(str(ensure_model()), providers=["CPUExecutionProvider"])
 
 
 _SESSION = None

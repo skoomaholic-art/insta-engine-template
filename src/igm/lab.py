@@ -7,12 +7,13 @@ A segment is called a leader/laggard only with enough posts; one viral post prov
 """
 import argparse
 import json
+import os
 import re
 import statistics
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .pipeline import POSTS_PATH, load_state, save_state, utc_now
+from .pipeline import DEFAULT_BASE, POSTS_PATH, TOKEN_EXPIRED_TEXT, load_state, save_state, send_alert, utc_now
 
 LAB_PATH = Path("data/pipeline/lab.json")
 ALMATY = timezone(timedelta(hours=5))
@@ -25,6 +26,12 @@ DIMENSIONS = {
     "visual": "Картинка",
 }
 WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+TOKEN_LIFETIME_DAYS = 60  # долгоживущий токен Instagram Login
+TOKEN_WARN_DAYS = 50
+
+
+def _is_token_error(err):
+    return getattr(err, "code", None) == 190
 
 
 def parse_time(value):
@@ -45,6 +52,7 @@ def collect(state, api, now=None):
     now = now or datetime.now(timezone.utc)
     updated, source = 0, "insights"
     errors = collect.errors = []
+    collect.token_expired = False
     for post in state["posts"]:
         ig = post.get("ig") or {}
         if post.get("status") != "published" or not ig.get("media_id") or ig.get("missing"):
@@ -63,10 +71,12 @@ def collect(state, api, now=None):
             values = api.media_insights(ig["media_id"], ig.get("type", ""))
         except Exception as err:
             errors.append(f"{post['id']} insights: {safe_error(err)}")
+            collect.token_expired = collect.token_expired or _is_token_error(err)
             try:
                 values, source = api.media_basic(ig["media_id"]), "basic"
             except Exception as err2:
-                if "subcode 33" in str(err2):  # пост удалён из Instagram — больше не запрашиваем
+                collect.token_expired = collect.token_expired or _is_token_error(err2)
+                if getattr(err2, "subcode", None) == 33:  # пост удалён из Instagram — больше не запрашиваем
                     ig["missing"] = True
                     post["ig"] = ig
                     errors.append(f"{post['id']}: нет в Instagram (удалён), исключён из замеров")
@@ -196,10 +206,49 @@ def analyze(state, now=None):
     }
 
 
-def run(root=".", api_factory=None, now=None):
+def token_age_warning(issued_at, now):
+    """Текст предупреждения, если токену (по переменной IG_TOKEN_ISSUED_AT) уже TOKEN_WARN_DAYS дней и больше."""
+    issued = parse_time(issued_at) if issued_at else None
+    if not issued:
+        return None
+    issued = issued if issued.tzinfo else issued.replace(tzinfo=timezone.utc)
+    age = (now - issued).days
+    if age < TOKEN_WARN_DAYS:
+        return None
+    expires = issued + timedelta(days=TOKEN_LIFETIME_DAYS)
+    left = (expires - now).days
+    when = f"истекает {expires.date().isoformat()} (через {left} дн.)" if left >= 0 else f"срок вышел {expires.date().isoformat()}"
+    return (f"Токену Instagram {age} дн.: {when}. Как обновить: Meta for Developers → приложение → Instagram → "
+            "API setup with Instagram login → Generate token; вставьте в GitHub → IGM → Settings → Secrets and variables → Actions → "
+            "IG_ACCESS_TOKEN и поставьте сегодняшнюю дату в переменной IG_TOKEN_ISSUED_AT.")
+
+
+def _alert_once(alerts, kind, text, now, alerter):
+    """Не чаще раза в сутки на каждый вид предупреждения (дата хранится в lab.json → alerts)."""
+    today = now.astimezone(ALMATY).date().isoformat()
+    if alerts.get(kind) == today:
+        return False
+    if alerter(text[:500]):
+        alerts[kind] = today
+        return True
+    print(f"lab: alert {kind} не доставлен")
+    return False
+
+
+def run(root=".", api_factory=None, now=None, env=os.environ, alerter=None):
+    now = now or datetime.now(timezone.utc)
     path = Path(root) / POSTS_PATH
+    out = Path(root) / LAB_PATH
+    if alerter is None:
+        base, secret = env.get("PIPELINE_BASE_URL") or DEFAULT_BASE, env.get("PIPELINE_SECRET", "")
+        alerter = lambda text: send_alert(base, secret, text)
+    try:
+        alerts = dict(json.loads(out.read_text(encoding="utf-8")).get("alerts") or {})
+    except (OSError, ValueError, AttributeError):
+        alerts = {}
     state = load_state(path)
     note = "no published posts"
+    token_expired = False
     if any(p.get("status") == "published" for p in state["posts"]):
         errors = []
         try:
@@ -207,16 +256,29 @@ def run(root=".", api_factory=None, now=None):
             api = (api_factory or InstagramAPI)()
             updated, source = collect(state, api, now)
             errors = collect.errors
+            token_expired = collect.token_expired
+            if not token_expired and hasattr(api, "profile"):
+                try:  # дешёвая проверка токена, даже если замеров сегодня не было
+                    api.profile()
+                except Exception as err:
+                    token_expired = _is_token_error(err)
             save_state(state, path)
             note = f"metrics updated for {updated} post(s) via {source}"
         except Exception as err:  # метрики не собрались — анализ всё равно пересчитываем
             errors = [f"setup: {safe_error(err)}"]
+            token_expired = _is_token_error(err)
             note = "metrics not collected"
         for e in errors:
             print("lab:", e)
+    if token_expired:
+        _alert_once(alerts, "token_expired", TOKEN_EXPIRED_TEXT, now, alerter)
+    else:
+        warning = token_age_warning(env.get("IG_TOKEN_ISSUED_AT"), now)
+        if warning:
+            _alert_once(alerts, "token_age", warning, now, alerter)
     lab = analyze(state, now)
     lab["errors"] = (errors if any(p.get("status") == "published" for p in state["posts"]) else [])[:20]
-    out = Path(root) / LAB_PATH
+    lab["alerts"] = alerts
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(lab, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return note + f"; lab: {lab['posts_measured']} measured"

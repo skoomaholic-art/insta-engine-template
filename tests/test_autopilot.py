@@ -117,30 +117,20 @@ class AutopilotTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "explicit owner activation"):
                 load_policy()
 
-    def test_publish_one_and_lock_before_meta(self):
-        first = good_post()
-        second = good_post()
-        second["id"] = "cinema_002"
-        store = FakeStore([first, second])
+    def test_enabled_flag_still_never_publishes(self):
+        # Публикация автопилотом удалена: только пайплайн с двумя согласованиями владельца
+        store = FakeStore([good_post()])
         client = FakeInstagram()
         with patch.dict(os.environ, {"IGM_ENABLE_PUBLISH": "true"}):
-            result = run_autopilot(store, client, NOW)
-        self.assertEqual(client.calls, 1)
-        self.assertEqual(store.states, ["publishing", "published"])
-        self.assertEqual(store.manifest["posts"][0]["instagram_media_id"], "987654321")
-        self.assertEqual(store.manifest["posts"][1]["status"], "ready")
-        self.assertIn("опубликовано", result)
+            answer = run_autopilot(store, client, NOW)
+        self.assertIn("двумя согласованиями", answer)
+        self.assertEqual(client.calls, 0)
+        self.assertEqual(store.states, [])
 
-    def test_meta_error_leaves_lock_prevents_repost(self):
-        store = FakeStore([good_post()])
-        client = FakeInstagram(fail=True)
-        with patch.dict(os.environ, {"IGM_ENABLE_PUBLISH": "true"}):
-            result = run_autopilot(store, client, NOW)
-            result_again = run_autopilot(store, client, NOW)
-        self.assertEqual(client.calls, 1)
-        self.assertEqual(store.states, ["publishing"])
-        self.assertIn("ошибка Meta", result)
-        self.assertIn("нет", result_again)
+    def test_autopilot_workflow_removed(self):
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        self.assertFalse((root / ".github/workflows/instagram-autopilot.yml").exists())
 
 
 if __name__ == "__main__":

@@ -9,8 +9,9 @@ on:
 permissions:
   contents: write
 
+# своя группа: общая с pipeline.yml могла отменить ожидающий запуск пайплайна
 concurrency:
-  group: igm-pipeline
+  group: igm-lab
   cancel-in-progress: false
 
 jobs:
@@ -32,7 +33,11 @@ jobs:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           META_GRAPH_VERSION: v26.0
           IG_AUTH_MODE: instagram
-          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+          IG_EXPECTED_USERNAME: mybrand
+          # предупреждение об истечении токена (с 50-го дня) и об ошибке 190 — событие alert боту
+          IG_TOKEN_ISSUED_AT: ${{ vars.IG_TOKEN_ISSUED_AT }}
+          PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
+          PIPELINE_BASE_URL: ${{ vars.PIPELINE_BASE_URL }}
         run: python -m igm.lab
       - name: Save
         run: |

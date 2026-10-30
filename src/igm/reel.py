@@ -14,6 +14,7 @@ FPS = 30
 XFADE = 0.5
 W, H = 1080, 1920
 MAX_SECONDS = 90
+MIN_SECONDS = 3.2  # Instagram не принимает Reels короче 3 с; берём с запасом
 MOODS = ("tense", "calm", "epic", "sad", "upbeat", "mystery")
 MUSIC_DIR = Path("media/music")
 MUSIC_INDEX = Path("content/music.json")
@@ -65,6 +66,8 @@ def scene_durations(slides, style=None):
     if total > MAX_SECONDS:  # не длиннее лимита
         k = MAX_SECONDS / total
         out = [round(d * k, 2) for d in out]
+    elif out and total < MIN_SECONDS:  # одна короткая сцена: растягиваем до минимума Instagram
+        out[-1] = round(out[-1] + (MIN_SECONDS - total) + 0.005, 2)
     return out
 
 

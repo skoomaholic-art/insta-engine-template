@@ -1,6 +1,7 @@
 """MyBrand post pipeline: owner-approved text → rendered post → owner-approved final → Instagram.
 
-Runs in GitHub Actions (workflow pipeline.yml) when data/pipeline/posts.json changes.
+Runs in GitHub Actions (workflow pipeline.yml) when the bot pushes data/pipeline/kick.json
+(plus a backup hourly schedule). The robot itself never writes kick.json.
 Statuses written by the Telegram bot / Mini App (Vercel):
     text_review → rendering        (owner approved the text)
     final_review → publishing      (owner approved the rendered final)
@@ -11,21 +12,25 @@ Nothing is published without both owner approvals recorded in the post.
 """
 import argparse
 import base64
+import copy
 import hashlib
 import hmac
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.request import Request, urlopen
 
+from .instagram import InstagramError
 from .policy import is_blocked_username
 
 POSTS_PATH = Path("data/pipeline/posts.json")
+KICK_PATH = Path("data/pipeline/kick.json")  # пишет только бот: пуш этого файла запускает pipeline.yml
 MEDIA_DIR = Path("media/posts")
 DEFAULT_BASE = "https://your-app.vercel.app"
 MEDIA_TTL = 3 * 3600
@@ -33,6 +38,10 @@ MEDIA_TTL = 3 * 3600
 
 class PipelineError(RuntimeError):
     pass
+
+
+class ConcurrentUpdate(PipelineError):
+    """Бот изменил posts.json одновременно с роботом и git не смог слить правки: пост пропускаем без записи, повторит следующий запуск."""
 
 
 def utc_now():
@@ -170,6 +179,19 @@ def _probe_size(path):
     return int(w), int(h)
 
 
+MIN_REEL_SECONDS = 3.2  # Instagram не принимает Reels короче 3 с
+
+
+def _probe_duration(path):
+    """Длительность файла в секундах (0, если ffprobe не смог прочитать)."""
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+                         capture_output=True, text=True).stdout.strip()
+    try:
+        return float(out)
+    except ValueError:
+        return 0.0
+
+
 def own_image_filter(w, h):
     """Instagram feed accepts 4:5 … 1.91:1; pad (never crop) the owner's picture into that range."""
     ratio = h / w
@@ -192,8 +214,13 @@ def render_own(post, root="."):
     if post["draft"].get("format") == "reel":
         src = Path(root) / sources[0]
         out = folder / "reel.mp4"
+        # клип владельца короче минимума Instagram — держим последний кадр до MIN_REEL_SECONDS
+        short = max(0.0, MIN_REEL_SECONDS - _probe_duration(src))
+        hold = f",tpad=stop_mode=clone:stop_duration={short:.2f}" if short > 0 else ""
+        audio_pad = ["-af", f"apad=pad_dur={short:.2f}"] if short > 0 else []
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-t", "90",
-                        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=0x12161B,format=yuv420p,fps=30",
+                        "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=0x12161B,format=yuv420p,fps=30" + hold,
+                        *audio_pad,
                         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "44100",
                         "-movflags", "+faststart", str(out)], check=True)
         if subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", str(out)],
@@ -289,15 +316,24 @@ def can_publish(post, env=os.environ):
     if str(env.get("IGM_ENABLE_PUBLISH", "")).lower() != "true":
         raise PipelineError("Публикация выключена: в IGM переменная IGM_ENABLE_PUBLISH не равна true")
     approvals = post.get("approvals") or {}
-    if not (approvals.get("text") or {}).get("by") or not (approvals.get("final") or {}).get("by"):
+    final = approvals.get("final") or {}
+    if not (approvals.get("text") or {}).get("by") or not final.get("by"):
         raise PipelineError("Нет двух согласований владельца (текст и финал)")
-    if (post.get("ig") or {}).get("media_id"):
+    ig = post.get("ig") or {}
+    if ig.get("media_id") or ig.get("container_id") or post.get("status") == "published":
         raise PipelineError("Пост уже опубликован")
     if is_blocked_username(post.get("draft", {}).get("target_username")):
         raise PipelineError("Взаимодействие запрещено политикой аккаунта")
     media = post.get("media") or {}
     if not media.get("images"):
         raise PipelineError("Нет готовых изображений")
+    # Контракт с ботом: финал согласован именно для этого рендера (approvals.final.rid = media.rendered_at)
+    rendered_at = media.get("rendered_at")
+    if "rid" in final and final.get("rid") != rendered_at:
+        raise PipelineError("Финал согласован для другого рендера (rid не равен media.rendered_at) — согласуйте актуальный финал заново")
+    final_at, rendered = parse_iso(final.get("at")), parse_iso(rendered_at)
+    if final_at and rendered and final_at < rendered:
+        raise PipelineError("Финал согласован раньше последнего рендера — согласуйте актуальный финал заново")
     caption = str(post["draft"].get("caption") or "").strip()
     if not caption:
         raise PipelineError("Пустая подпись")
@@ -327,46 +363,146 @@ def with_image_credit(caption, post):
     return "\n\n".join(x for x in (body, credit, "\n".join(tail).strip()) if x)
 
 
-def publish_post(post, api, base, secret, env=os.environ, sleep=time.sleep):
+
+def post_caption(post):
+    """Подпись в том виде, в каком она уходит в Instagram (для сверки с опубликованными)."""
+    return with_image_credit(str((post.get("draft") or {}).get("caption") or "").strip(), post)
+
+
+def send_to_instagram(post, api, base, secret, env=os.environ, sleep=time.sleep, on_container=None):
+    """Отправить пост в Instagram. on_container(id) вызывается ДО media_publish (сохраняем ig_pending)."""
     caption = can_publish(post, env)
     media = post["media"]
     url = lambda path: media_url(base, path, secret)
+    kw = {"on_container": on_container} if on_container else {}
     fmt = post["draft"].get("format")
     if fmt == "reel":
         if not media.get("video"):
             raise PipelineError("Для Reels нет видео")
-        result = api.publish_reel(url(media["video"]), caption, cover_url=url(media["images"][0]), sleep=sleep)
+        result = api.publish_reel(url(media["video"]), caption, cover_url=url(media["images"][0]), sleep=sleep, **kw)
         kind = "REELS"
     elif len(media["images"]) >= 2:
-        result = api.publish_carousel([url(p) for p in media["images"]], caption, sleep=sleep)
+        result = api.publish_carousel([url(p) for p in media["images"]], caption, sleep=sleep, **kw)
         kind = "CAROUSEL"
     else:
-        result = api.publish_single_image(url(media["images"][0]), caption, sleep=sleep)
+        result = api.publish_single_image(url(media["images"][0]), caption, sleep=sleep, **kw)
         kind = "IMAGE"
-    post["ig"] = {"media_id": result["media_id"], "permalink": result.get("permalink") or None, "published_at": utc_now(), "type": kind}
+    return result, kind
+
+
+def media_kind(post):
+    fmt = (post.get("draft") or {}).get("format")
+    if fmt == "reel":
+        return "REELS"
+    return "CAROUSEL" if len((post.get("media") or {}).get("images") or []) >= 2 else "IMAGE"
+
+
+def apply_published(post, result, kind, note=None):
+    """Записать факт публикации в пост (и после обычной публикации, и после сверки «завис/неизвестный исход»)."""
+    post["ig"] = {"media_id": result.get("media_id") or None, "permalink": result.get("permalink") or None,
+                  "published_at": result.get("published_at") or utc_now(), "type": kind}
+    if result.get("container_id"):
+        post["ig"]["container_id"] = str(result["container_id"])
+    post.pop("ig_pending", None)
     post["status"] = "published"
     post["error"] = None
-    log(post, "published", result.get("permalink") or result["media_id"])
+    log(post, "published", note or result.get("permalink") or result.get("media_id") or result.get("container_id"))
     return post
 
 
+def publish_post(post, api, base, secret, env=os.environ, sleep=time.sleep, on_container=None):
+    result, kind = send_to_instagram(post, api, base, secret, env, sleep, on_container)
+    return apply_published(post, result, kind)
+
+
+# ---------- сверка: вышел ли пост, если ответ Meta потерялся или запуск оборвался ----------
+RECONCILE_WINDOW = timedelta(hours=2)
+
+
+def _norm_caption(text):
+    return " ".join(str(text or "").split())[:120]
+
+
+def publish_started_at(post):
+    """Когда робот поставил блокировку publishing_in_progress (последняя запись publish_started)."""
+    for h in reversed(post.get("history") or []):
+        if isinstance(h, dict) and h.get("event") == "publish_started":
+            return parse_iso(h.get("at"))
+    return None
+
+
+def find_published(api, post, caption, now=None):
+    """Проверка без публикации: статус контейнера из ig_pending и/или пост с той же подписью среди последних.
+    Возвращает dict с media_id/permalink/container_id, если пост вышел; None — если точно не вышел.
+    Если проверить не удалось — PipelineError (публиковать повторно нельзя)."""
+    now = now or datetime.now(timezone.utc)
+    pending = post.get("ig_pending") or {}
+    cid = str(pending.get("container_id") or "")
+    status = None
+    if cid:
+        try:
+            status = api.container_status(cid)
+        except Exception:  # контейнер мог истечь (24 ч) — опираемся на список публикаций
+            status = None
+    since = parse_iso(pending.get("at")) or publish_started_at(post) or (now - RECONCILE_WINDOW)
+    lo, hi = since - timedelta(minutes=10), since + RECONCILE_WINDOW
+    want = _norm_caption(caption)
+    try:
+        media = api.recent_media(limit=25)
+    except Exception as err:
+        if status == "PUBLISHED":
+            return {"container_id": cid, "media_id": None, "permalink": None}
+        if status:  # контейнер жив и не опубликован — значит, поста нет
+            return None
+        raise PipelineError(f"Не удалось проверить, вышел ли пост в Instagram ({type(err).__name__}); повторная публикация заблокирована") from None
+    for m in media or []:
+        at = parse_iso(m.get("timestamp"))
+        if want and _norm_caption(m.get("caption")) == want and (at is None or lo <= at <= hi):
+            return {"media_id": str(m.get("id") or "") or None, "permalink": m.get("permalink"), "container_id": cid or None,
+                    "published_at": at.isoformat(timespec="seconds") if at else None}
+    if status == "PUBLISHED":
+        return {"container_id": cid, "media_id": None, "permalink": None}
+    return None
+
+
 # ---------- notifications to the owner via Vercel bot ----------
+ALERT_ID = "P0000"
+TOKEN_EXPIRED_TEXT = ("Токен Instagram истёк или отозван (ошибка Meta 190): публикации и метрики остановлены. "
+                      "Как обновить: Meta for Developers → ваше приложение → Instagram → API setup with Instagram login → "
+                      "Generate token для mybrand; вставьте его в GitHub → IGM → Settings → Secrets and variables → Actions "
+                      "→ секрет IG_ACCESS_TOKEN и укажите сегодняшнюю дату в переменной IG_TOKEN_ISSUED_AT.")
+
+
 def hook_signature(post_id, event, ts, secret):
     return hmac.new(secret.encode(), f"{post_id}:{event}:{int(ts)}".encode(), hashlib.sha256).hexdigest()
 
 
-def notify(base, secret, post_id, event, transport=urlopen, timeout=25):
+def notify(base, secret, post_id, event, transport=urlopen, timeout=25, text=None):
     if not secret:
+        print(f"notify skipped: {event} {post_id}: PIPELINE_SECRET не задан")
         return False
     ts = int(time.time())
-    body = json.dumps({"id": post_id, "event": event, "ts": ts}).encode()
+    payload = {"id": post_id, "event": event, "ts": ts}
+    if text is not None:
+        payload["text"] = str(text)[:500]
+    body = json.dumps(payload, ensure_ascii=False).encode()
     req = Request(base.rstrip("/") + "/api/pipeline-hook", data=body, method="POST",
                   headers={"Content-Type": "application/json", "X-Pipeline-Signature": hook_signature(post_id, event, ts, secret)})
     try:
         with transport(req, timeout=timeout) as r:
-            return 200 <= getattr(r, "status", 200) < 300
-    except Exception:  # notification failure must not undo a completed render/publish
+            status = getattr(r, "status", 200)
+            if not 200 <= status < 300:
+                print(f"notify failed: {event} {post_id}: HTTP {status}")
+                return False
+            return True
+    except Exception as err:  # notification failure must not undo a completed render/publish
+        print(f"notify failed: {event} {post_id}: HTTP {getattr(err, 'code', None) or type(err).__name__}")
         return False
+
+
+def send_alert(base, secret, text, transport=urlopen):
+    """Событие alert (id P0000): бот пересылает text владельцу."""
+    return notify(base, secret, ALERT_ID, "alert", transport=transport, text=str(text)[:500])
 
 
 def ping(base, secret, transport=urlopen):
@@ -387,7 +523,22 @@ def ping(base, secret, transport=urlopen):
         return {"ok": False, "error": f"Vercel не ответил ({code or type(err).__name__})"}
 
 
+# ---------- git ----------
+def _git(*args):
+    return subprocess.run(["git", *args], capture_output=True, text=True)
+
+
+def _restore_remote(paths):
+    """После неудачного rebase: ветка = origin/main, все файлы как на сервере, кроме медиа этого поста
+    (их использует повторная попытка). posts.json — серверный, без маркеров конфликта."""
+    _git("reset", "-q", "--mixed", "origin/main")
+    keep = [f":(exclude){Path(p).as_posix()}" for p in paths if Path(p).as_posix() != POSTS_PATH.as_posix()]
+    _git("checkout", "origin/main", "--", ".", *keep)
+
+
 def git_commit_push(message, paths):
+    if any(Path(p).as_posix() == KICK_PATH.as_posix() for p in paths):
+        raise PipelineError("Робот не пишет kick.json: его пишет только бот")
     subprocess.run(["git", "add", "--", *paths], check=True)
     if subprocess.run(["git", "diff", "--cached", "--quiet"]).returncode == 0:
         return False
@@ -395,65 +546,218 @@ def git_commit_push(message, paths):
     for attempt in range(4):
         if subprocess.run(["git", "push", "-q", "origin", "HEAD:main"]).returncode == 0:
             return True
-        subprocess.run(["git", "pull", "-q", "--rebase", "origin", "main"], check=True)
+        if _git("fetch", "-q", "origin", "main").returncode != 0:
+            raise PipelineError("git fetch failed")
+        if _git("rebase", "-q", "origin/main").returncode != 0:
+            # Конфликт с ботом: не коммитим файл с маркерами и не затираем чужие правки
+            _git("rebase", "--abort")
+            _restore_remote(paths)
+            raise ConcurrentUpdate("posts.json одновременно изменён ботом (конфликт rebase)")
     raise PipelineError("git push failed")
 
 
+# ---------- зависшие посты ----------
+STUCK_PUBLISH = timedelta(minutes=20)
+STUCK_RENDER = timedelta(minutes=30)
+ACTIVE = ("rendering", "publishing", "scheduled", "publishing_in_progress")
+
+
+def last_change(post):
+    times = [parse_iso(post.get("updated_at_utc"))]
+    hist = post.get("history") or []
+    if hist and isinstance(hist[-1], dict):
+        times.append(parse_iso(hist[-1].get("at")))
+    times = [t for t in times if t]
+    return max(times) if times else None
+
+
+def is_stuck(post, now=None):
+    """Пост слишком долго в промежуточном статусе (запуск оборвался). Без отметок времени — не трогаем."""
+    now = now or datetime.now(timezone.utc)
+    changed = last_change(post)
+    if not changed:
+        return False
+    if post.get("status") == "publishing_in_progress":
+        return now - changed > STUCK_PUBLISH
+    if post.get("status") == "rendering":
+        return now - changed > STUCK_RENDER
+    return False
+
+
+def _render_retried(post):
+    """Последнее изменение поста — наш перезапуск рендера (значит, он снова завис)."""
+    retry, changed = parse_iso(post.get("render_retry")), last_change(post)
+    return bool(retry and changed and retry >= changed - timedelta(seconds=5))
+
+
+def _changes(before, after):
+    """Правка, которую сделал робот: изменённые поля целиком + новые записи истории.
+    Её можно повторить на свежей копии posts.json, не трогая правки бота в других постах."""
+    missing = object()
+    keys = [k for k in set(before) | set(after) if k != "history" and before.get(k, missing) != after.get(k, missing)]
+    new_hist = (after.get("history") or [])[len(before.get("history") or []):]
+
+    def mutate(p):
+        for k in keys:
+            if k in after:
+                p[k] = copy.deepcopy(after[k])
+            else:
+                p.pop(k, None)
+        p.setdefault("history", []).extend(copy.deepcopy(new_hist))
+    return mutate
+
+
 def run(env=os.environ, root=".", api_factory=None, renderer=playwright_render, video_maker=make_reel_video,
-        commit=git_commit_push, notifier=notify, sleep=time.sleep):
+        commit=git_commit_push, notifier=notify, sleep=time.sleep, alerter=None, now=None):
     base = env.get("PIPELINE_BASE_URL") or DEFAULT_BASE
     secret = env.get("PIPELINE_SECRET", "")
     path = Path(root) / POSTS_PATH
     report = []
+    if alerter is None:
+        # в тестах notifier подменён — тогда и alert идёт через него (без сети)
+        alerter = (lambda text: send_alert(base, secret, text)) if notifier is notify else (lambda text: notifier(base, secret, ALERT_ID, "alert"))
 
-    def reload_post(pid):
+    def find(state, pid):
+        return next((p for p in state["posts"] if p.get("id") == pid), None)
+
+    def persist(pid, mutate, message, paths, expect=None):
+        """Всегда: свежий posts.json с диска → правка только этого поста → коммит.
+        Состояние, прочитанное до git pull/rebase, никогда не записываем (иначе откатим правки бота)."""
+        for attempt in range(2):
+            state = load_state(path)
+            post = find(state, pid)
+            if post is None:
+                raise ConcurrentUpdate(f"{pid} исчез из posts.json")
+            if expect and post.get("status") not in expect:
+                raise ConcurrentUpdate(f"{pid}: бот сменил статус на {post.get('status')}")
+            mutate(post)
+            save_state(state, path)
+            try:
+                commit(message, paths)
+                return post
+            except ConcurrentUpdate:
+                if attempt:
+                    raise
+
+    def failed(pid, stage, err, expect_alert=None):
+        message = str(err)[:400]
+
+        def mark(p):
+            if p.get("status") in ACTIVE:  # статус, выставленный ботом/владельцем, не перетираем
+                p["status"] = "failed"
+                p["error"] = {"stage": stage, "message": message, "at": utc_now()}
+            log(p, f"{stage}_failed", err)
+        try:
+            persist(pid, mark, f"pipeline: {stage} failed {pid}", [str(POSTS_PATH)])
+        except ConcurrentUpdate as cu:
+            report.append(f"{pid}: {stage} failed, not recorded ({cu})")
+            return
+        notifier(base, secret, pid, "failed")
+        if isinstance(err, InstagramError) and err.token_expired:
+            alerter(TOKEN_EXPIRED_TEXT)
+        elif expect_alert:
+            alerter(expect_alert)
+        report.append(f"{pid}: {stage} failed: {err}")
+
+    def mark_found(pid, found, kind, note):
+        persist(pid, lambda p: apply_published(p, found, kind, note), f"pipeline: published {pid}", [str(POSTS_PATH)])
+        notifier(base, secret, pid, "published")
+        report.append(f"{pid}: published ({note})")
+
+    for pid in work_plan(root, now):
         state = load_state(path)
-        return state, next((p for p in state["posts"] if p.get("id") == pid), None)
-
-    ids = needs_work(root)
-    for pid in ids:
-        state, post = reload_post(pid)
+        post = find(state, pid)
         if not post:
             continue
         status = post["status"]
         if status == "scheduled":  # время отложенной публикации пришло — публикуем как обычно
-            if not is_due(post):
+            if not is_due(post, now):
                 continue
             status = "publishing"
+        pending_saved = False
         try:
             if status == "rendering":
+                if is_stuck(post, now):
+                    if _render_retried(post):
+                        failed(pid, "render", PipelineError("Рендер завис повторно (нет результата больше 30 минут)"),
+                               expect_alert=f"Пост {pid}: рендер завис дважды и помечен failed. Проверьте Actions → Post Pipeline.")
+                        continue
+                    stamp = utc_now()
+
+                    def retry(p, stamp=stamp):
+                        log(p, "render_retry", "рендер завис больше 30 минут — пробуем ещё раз")
+                        p["render_retry"] = p["updated_at_utc"] = stamp
+                    persist(pid, retry, f"pipeline: re-render {pid}", [str(POSTS_PATH)], expect=("rendering",))
+                    state = load_state(path)
+                    post = find(state, pid)
+                before = copy.deepcopy(post)
                 render_post(post, base, root, renderer, video_maker)
-                save_state(state, path)
-                commit(f"pipeline: render {pid}", [str(POSTS_PATH), str(MEDIA_DIR / pid)])
+                change = _changes(before, post)
+
+                def rendered(p, change=change):
+                    change(p)
+                    p.pop("render_retry", None)
+                persist(pid, rendered, f"pipeline: render {pid}", [str(POSTS_PATH), str(MEDIA_DIR / pid)], expect=("rendering",))
                 notifier(base, secret, pid, "final_ready")
                 report.append(f"{pid}: rendered")
+            elif status == "publishing_in_progress":
+                # Сверка зависшей публикации: пост мог выйти, а запуск оборваться
+                status = "reconcile"
+                api = (api_factory or _default_api)()
+                found = find_published(api, post, post_caption(post))
+                if found:
+                    mark_found(pid, found, media_kind(post), "найден в Instagram после зависания")
+                else:
+                    failed(pid, "publish_uncertain", PipelineError("Публикация прервалась; в Instagram пост не найден. Проверьте профиль и при необходимости повторите"),
+                           expect_alert=f"Пост {pid} завис при публикации больше 20 минут и в Instagram не найден. Проверьте профиль mybrand; если поста нет — нажмите «Повторить».")
             elif status == "publishing":
                 if not secret:
                     raise PipelineError("PIPELINE_SECRET не задан в IGM")
                 can_publish(post, env)
                 # Lock first so a re-run can never publish twice
-                post["status"] = "publishing_in_progress"
-                log(post, "publish_started")
-                save_state(state, path)
-                commit(f"pipeline: publishing {pid}", [str(POSTS_PATH)])
+                persist(pid, lambda p: (p.__setitem__("status", "publishing_in_progress"), log(p, "publish_started")),
+                        f"pipeline: publishing {pid}", [str(POSTS_PATH)], expect=("publishing", "scheduled"))
+                post = find(load_state(path), pid)
                 api = (api_factory or _default_api)()
-                publish_post(post, api, base, secret, env, sleep)
-                save_state(state, path)
-                commit(f"pipeline: published {pid}", [str(POSTS_PATH)])
+                if post.get("ig_pending") or (post.get("error") or {}).get("stage") == "publish_uncertain":
+                    # прошлый исход неизвестен: сначала проверяем, не вышел ли пост
+                    found = find_published(api, post, post_caption(post))
+                    if found:
+                        mark_found(pid, found, media_kind(post), "уже был опубликован — повтор не нужен")
+                        continue
+
+                def on_container(cid, pid=pid):
+                    nonlocal pending_saved
+                    persist(pid, lambda p: (p.__setitem__("ig_pending", {"container_id": str(cid), "at": utc_now()}), log(p, "container_ready", cid)),
+                            f"pipeline: container {pid}", [str(POSTS_PATH)], expect=("publishing_in_progress",))
+                    pending_saved = True
+                result, kind = send_to_instagram(post, api, base, secret, env, sleep, on_container)
+                persist(pid, lambda p: apply_published(p, result, kind), f"pipeline: published {pid}", [str(POSTS_PATH)])
                 notifier(base, secret, pid, "published")
                 report.append(f"{pid}: published")
+        except ConcurrentUpdate as err:  # бот поменял posts.json одновременно — пропускаем, следующий запуск повторит
+            report.append(f"{pid}: skipped, concurrent update: {err}")
         except Exception as err:  # record and tell the owner; never retry a publish silently
-            state, post = reload_post(pid) if status == "rendering" else (state, post)
-            if post is None:
+            if status == "rendering":
+                failed(pid, "render", err)
                 continue
-            stage = "render" if status == "rendering" else "publish"
-            post["status"] = "failed"
-            post["error"] = {"stage": stage, "message": str(err)[:400], "at": utc_now()}
-            log(post, f"{stage}_failed", err)
-            save_state(state, path)
-            commit(f"pipeline: {stage} failed {pid}", [str(POSTS_PATH)])
-            notifier(base, secret, pid, "failed")
-            report.append(f"{pid}: {stage} failed: {err}")
+            if status == "reconcile":
+                failed(pid, "publish_uncertain", err, expect_alert=f"Пост {pid} завис при публикации, проверить Instagram не удалось: {str(err)[:200]}")
+                continue
+            if pending_saved:
+                # запрос media_publish мог дойти до Meta: проверяем, прежде чем объявить ошибку
+                try:
+                    post = find(load_state(path), pid)
+                    found = find_published((api_factory or _default_api)(), post, post_caption(post))
+                except Exception:
+                    found = None
+                if found:
+                    mark_found(pid, found, media_kind(post), "ответ Meta потерян, пост найден")
+                    continue
+                failed(pid, "publish_uncertain", err, expect_alert=None if isinstance(err, InstagramError) and err.token_expired else
+                       f"Пост {pid}: исход публикации неизвестен ({str(err)[:150]}). Проверьте профиль перед «Повторить» — робот сверит сам.")
+                continue
+            failed(pid, "publish", err)
     return report
 
 
@@ -477,9 +781,23 @@ def parse_iso(value):
         return None
 
 
-def needs_work(root=".", now=None):
+def work_plan(root=".", now=None):
+    """{id: вид работы}: render — нужен браузер/ffmpeg; publish и reconcile — только API Instagram."""
     state = load_state(Path(root) / POSTS_PATH)
-    return [p["id"] for p in state["posts"] if p.get("status") in ("rendering", "publishing") or is_due(p, now)]
+    plan = {}
+    for p in state["posts"]:
+        status = p.get("status")
+        if status == "rendering":
+            plan[p["id"]] = "render"
+        elif status == "publishing" or is_due(p, now):
+            plan[p["id"]] = "publish"
+        elif status == "publishing_in_progress" and is_stuck(p, now):
+            plan[p["id"]] = "reconcile"
+    return plan
+
+
+def needs_work(root=".", now=None):
+    return list(work_plan(root, now))
 
 
 def main():
@@ -487,13 +805,18 @@ def main():
     parser.add_argument("action", choices=["pending", "run"])
     args = parser.parse_args()
     if args.action == "pending":
-        ids = needs_work()
-        print(" ".join(ids))
+        plan = work_plan()
+        print(" ".join(f"{pid}:{kind}" for pid, kind in plan.items()))
         out = os.getenv("GITHUB_OUTPUT")
         if out:
             with open(out, "a", encoding="utf-8") as f:
-                f.write(f"work={'yes' if ids else 'no'}\n")
+                f.write(f"work={'yes' if plan else 'no'}\n")
+                f.write(f"render={'yes' if 'render' in plan.values() else 'no'}\n")
+                f.write(f"kinds={','.join(sorted(set(plan.values())))}\n")
         return
+    if not os.getenv("PIPELINE_SECRET"):
+        print("::error::PIPELINE_SECRET не задан в секретах IGM: робот не сможет сообщить боту о рендере/публикации. Добавьте секрет и перезапустите.")
+        sys.exit(1)
     for line in run():
         print(line)
 

@@ -49,7 +49,7 @@ jobs:
           IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
           META_GRAPH_VERSION: v26.0
           IG_AUTH_MODE: instagram
-          IG_EXPECTED_USERNAME: ${{ vars.IG_EXPECTED_USERNAME }}
+          IG_EXPECTED_USERNAME: mybrand
           IGM_ENABLE_PUBLISH: ${{ vars.IGM_ENABLE_PUBLISH }}
           PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
           PIPELINE_BASE_URL: ${{ vars.PIPELINE_BASE_URL }}

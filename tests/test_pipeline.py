@@ -18,15 +18,15 @@ class FakeAPI:
     def __init__(self):
         self.calls = []
 
-    def publish_carousel(self, urls, caption, sleep=None):
+    def publish_carousel(self, urls, caption, sleep=None, on_container=None):
         self.calls.append(("carousel", urls, caption))
         return {"media_id": "111", "permalink": "https://instagram.com/p/x"}
 
-    def publish_single_image(self, url, caption, sleep=None):
+    def publish_single_image(self, url, caption, sleep=None, on_container=None):
         self.calls.append(("image", url, caption))
         return {"media_id": "112"}
 
-    def publish_reel(self, url, caption, cover_url=None, sleep=None):
+    def publish_reel(self, url, caption, cover_url=None, sleep=None, on_container=None):
         self.calls.append(("reel", url, cover_url))
         return {"media_id": "113"}
 

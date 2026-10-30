@@ -41,16 +41,16 @@ class OfflineMeta:
         self.calls = 0
         self.fail = fail
 
-    def publish_carousel(self, urls, caption, sleep=None):
+    def publish_carousel(self, urls, caption, sleep=None, on_container=None):
         self.calls += 1
         if self.fail:
             raise RuntimeError("unknown Meta outcome")
         return {"media_id": "999", "permalink": None}
 
-    def publish_single_image(self, url, caption, sleep=None):
+    def publish_single_image(self, url, caption, sleep=None, on_container=None):
         return self.publish_carousel([url], caption, sleep)
 
-    def publish_reel(self, url, caption, cover_url=None, sleep=None):
+    def publish_reel(self, url, caption, cover_url=None, sleep=None, on_container=None):
         return self.publish_carousel([url], caption, sleep)
 
 
