@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   pipeline:
+    if: ${{ !endsWith(github.repository, '-template') }}  # в самом шаблоне не запускается, только в твоей копии
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -66,6 +67,6 @@ jobs:
           PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
           PIPELINE_BASE_URL: ${{ vars.PIPELINE_BASE_URL }}
         run: |
-          git config user.name "mybrand-pipeline"
-          git config user.email "pipeline@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           python -m igm.pipeline run

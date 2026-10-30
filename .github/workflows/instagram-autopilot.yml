@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   autopilot:
+    if: ${{ !endsWith(github.repository, '-template') }}  # в самом шаблоне не запускается, только в твоей копии
     runs-on: ubuntu-latest
     timeout-minutes: 7
     steps:

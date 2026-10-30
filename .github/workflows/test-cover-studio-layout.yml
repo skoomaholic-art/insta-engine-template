@@ -8,6 +8,7 @@ permissions:
   contents: read
 jobs:
   test-layout:
+    if: ${{ !endsWith(github.repository, '-template') }}  # в самом шаблоне не запускается, только в твоей копии
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

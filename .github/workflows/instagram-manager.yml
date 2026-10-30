@@ -26,7 +26,7 @@ concurrency:
 jobs:
   command:
     # Only repo owner's [IGM] issues can execute.
-    if: ${{ github.event_name != 'issues' || (github.event.issue.user.login == github.repository_owner && startsWith(github.event.issue.title, '[IGM]')) }}
+    if: ${{ !endsWith(github.repository, '-template') && (github.event_name != 'issues' || (github.event.issue.user.login == github.repository_owner && startsWith(github.event.issue.title, '[IGM]'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   lab:
+    if: ${{ !endsWith(github.repository, '-template') }}  # в самом шаблоне не запускается, только в твоей копии
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
@@ -35,8 +36,8 @@ jobs:
         run: python -m igm.lab
       - name: Save
         run: |
-          git config user.name "mybrand-lab"
-          git config user.email "lab@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/pipeline/posts.json data/pipeline/lab.json
           git diff --cached --quiet && exit 0
           git commit -q -m "lab: metrics and segment analysis"
